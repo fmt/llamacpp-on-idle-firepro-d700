@@ -1,0 +1,29 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 0ea4a82..7eefdd1 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1115,7 +1115,23 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+ 
+     @autoreleasepool {
+         if (dev->mtl_device == nil) {
+-            dev->mtl_device = MTLCreateSystemDefaultDevice();
++            {
++                // local patch: pick a specific GPU with GGML_METAL_GPU_INDEX
++                // (unset or out of range: fall back to the macOS default GPU)
++                NSArray<id<MTLDevice>> * all_devs = MTLCopyAllDevices();
++                const char * gpu_env = getenv("GGML_METAL_GPU_INDEX");
++                int gpu_idx = gpu_env ? atoi(gpu_env) : -1;
++                for (NSUInteger k = 0; k < [all_devs count]; ++k) {
++                    GGML_LOG_INFO("%s: GPU index %d: %s (registryID %llu)\n", __func__, (int) k,
++                            [[all_devs[k] name] UTF8String], (unsigned long long) [all_devs[k] registryID]);
++                }
++                if (gpu_idx >= 0 && gpu_idx < (int) [all_devs count]) {
++                    dev->mtl_device = [all_devs[gpu_idx] retain];
++                } else {
++                    dev->mtl_device = MTLCreateSystemDefaultDevice();
++                }
++                [all_devs release];
++            }
+ 
+             if (dev->mtl_device) {
+                 dev->mtl_queue = [dev->mtl_device newCommandQueue];
