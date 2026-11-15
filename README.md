@@ -1,6 +1,6 @@
 # llama.cpp on one FirePro D700 of a Mac Pro 6,1
 
-How to run a local LLM with [llama.cpp](https://github.com/ggml-org/llama.cpp) on a single AMD FirePro D700 of an Intel Mac Pro 6,1 (late 2013), keeping the other card free for the display. Includes a small patch that lets the Metal backend choose which GPU to use, and a record of why the Vulkan route (MoltenVK) failed.
+How to run a local LLM with [llama.cpp](https://github.com/ggml-org/llama.cpp) on a single AMD FirePro D700 of an Intel Mac Pro 6,1 (late 2013), keeping the other card free for the display. Includes a small patch that lets the Metal backend choose which GPU to use, and, in a separate section at the end, a record of the Vulkan route (MoltenVK) that was tried first and did not work.
 
 ## Status
 
@@ -14,8 +14,7 @@ This was tested once, on one machine, at one point in time. It may not apply or 
 | GPUs | 2 x AMD FirePro D700, 6 GB VRAM each |
 | macOS | 15.7.7 (build 24G720), installed with OpenCore Legacy Patcher 2.5.1 (the Mac Pro 6,1 is not officially supported on this version) |
 | llama.cpp | build b12407, commit `e574a17b062be51b98e239ccd3d3743e3d902333` |
-| Backend that works | Metal, with the patch in this repo |
-| Backend that fails | Vulkan through MoltenVK |
+| Backend | Metal, with the patch in this repo |
 | Model | Qwen2.5 7B Instruct, Q4_K_M (about 4.7 GB) |
 | Homebrew status | Intel Mac, unsupported (no bottles, formulas build from source) |
 
@@ -23,8 +22,9 @@ Full details are in [TESTED_ON.md](TESTED_ON.md).
 
 ## Summary
 
-- Metal works. Vulkan builds and lists both GPUs but crashes when the model loads.
+- Metal works, with the patch in this repo.
 - Upstream, the Metal backend always uses the macOS default GPU, which on this machine is the card that also runs WindowServer. There is no flag to pick the other card.
+- Vulkan (MoltenVK) was tried first and did not work. See [Tried Vulkan (MoltenVK), did not work](#tried-vulkan-moltenvk-did-not-work).
 - The patch adds an environment variable, `GGML_METAL_GPU_INDEX`, that selects a GPU by index. With it, the model ran on the idle card (shown as "Slot 1" in Activity Monitor) while WindowServer stayed on the other.
 
 ## Quick start
@@ -36,7 +36,7 @@ xcode-select --install   # skip if already installed
 brew install cmake
 ```
 
-No Vulkan, MoltenVK or shader packages are needed.
+Nothing else is needed.
 
 ### 2. Clone and check out the tested commit
 
@@ -134,7 +134,37 @@ cmake --build build-metal --config Release -j
 
 ### Observed (seen on the tested machine)
 
-- With Vulkan (MoltenVK 1.4.2 and vulkan-loader 1.4.363.0 from Homebrew), llama.cpp compiles and `--list-devices` shows `Vulkan0` and `Vulkan1`, 6144 MiB each.
+- The Metal backend builds, lists one device (`MTL0`) and runs the model. Without the patch, Activity Monitor shows the process on the same card as WindowServer.
+- Reading the source at the tested commit: `GGML_METAL_DEVICES` only sets how many devices are created, and device initialisation always calls `MTLCreateSystemDefaultDevice()`.
+- With the patch and `GGML_METAL_GPU_INDEX=1`, Activity Monitor shows `llama-cli` under the other card ("Slot 1").
+
+### Suspected (not verified)
+
+- **Index order.** Whether the GPU index order is the same across machines, reboots and display setups is unknown. Always check with Activity Monitor.
+- **Other GPUs.** Whether D300 and D500 cards, or other AMD GPUs on Intel Macs, behave the same way is unknown.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Process still shows under the display card | Try the other index (0 or 1) and recheck Activity Monitor |
+| Garbled text | Add `-fa off` and try `-c 2048` |
+| Out of memory | Use a smaller quant (Q3_K_M) or a 3B model |
+| Patch does not apply | llama.cpp has changed; make the one-line change by hand (see step 3) |
+| Patched build fails to compile | Revert with `git checkout ggml/src/ggml-metal/ggml-metal-device.m` and use the default GPU |
+| Metal fails to start | Build CPU-only to isolate the cause: `cmake -B build-cpu -DGGML_METAL=OFF -DGGML_VULKAN=OFF` |
+
+## Tried Vulkan (MoltenVK), did not work
+
+This section is a record only. Nothing in the Metal guide above depends on it.
+
+### Why Vulkan was tried first
+
+Vulkan lets you choose a GPU natively (`--device Vulkan1`), while upstream Metal has no way to pick a card. That made Vulkan the obvious first attempt for running on the card that is not driving the display, and it needs no patch to llama.cpp.
+
+### Observed (seen on the tested machine)
+
+- With MoltenVK 1.4.2 and vulkan-loader 1.4.363.0 from Homebrew, llama.cpp compiles and `--list-devices` shows `Vulkan0` and `Vulkan1`, 6144 MiB each.
 - Loading the model then aborts with:
 
   ```
@@ -150,17 +180,12 @@ cmake --build build-metal --config Release -j
   ```
 
   The move to the plain kernel is consistent with fusion being disabled. Whether the second variable name is honoured by that build was not verified.
-- The Metal backend builds, lists one device (`MTL0`) and runs the model. Without the patch, Activity Monitor shows the process on the same card as WindowServer.
-- Reading the source at the tested commit: `GGML_METAL_DEVICES` only sets how many devices are created, and device initialisation always calls `MTLCreateSystemDefaultDevice()`.
-- With the patch and `GGML_METAL_GPU_INDEX=1`, Activity Monitor shows `llama-cli` under the other card ("Slot 1").
 
 ### Suspected (not verified)
 
-- **Cause of the Vulkan failure.** On macOS, Vulkan is not native. llama.cpp's Vulkan backend ships its shaders as SPIR-V, and MoltenVK translates them to Metal shaders and hands them to the Metal compiler. The error appears at pipeline creation, which is where that last step happens. The likely cause is that the Metal compiler for the old AMD (GCN) driver rejects the translated shaders. The underlying compiler message was not captured, so the exact construct is unknown. If you capture it, please open an issue. MoltenVK has logging controls (`MVK_CONFIG_LOG_LEVEL`, name from memory) that may help.
+- **Cause of the failure.** On macOS, Vulkan is not native. llama.cpp's Vulkan backend ships its shaders as SPIR-V, and MoltenVK translates them to Metal shaders and hands them to the Metal compiler. The error appears at pipeline creation, which is where that last step happens. The likely cause is that the Metal compiler for the old AMD (GCN) driver rejects the translated shaders. The underlying compiler message was not captured, so the exact construct is unknown. If you capture it, please open an issue. MoltenVK has logging controls (`MVK_CONFIG_LOG_LEVEL`, name from memory) that may help.
 - **Why Metal works.** It uses kernels written directly for Metal, compiled by the same Metal compiler, with no translation layer. This is a reasoned explanation, not something that was tested.
 - **Effect of OpenCore Legacy Patcher.** The tested macOS version is not officially supported on this hardware, so the GPU driver stack is restored by OCLP root patches. Whether the MoltenVK failure comes from that patched stack, or would also happen on a macOS version Apple supports on this Mac, was not tested.
-- **Other GPUs.** Whether D300 and D500 cards, or other AMD GPUs on Intel Macs, behave the same way is unknown.
-- **Index order.** Whether the GPU index order is the same across machines, reboots and display setups is unknown. Always check with Activity Monitor.
 
 ### Trade-off
 
@@ -170,26 +195,14 @@ cmake --build build-metal --config Release -j
 | Pick a specific GPU | Yes (`--device Vulkan1`) | Not upstream; needs the patch in this repo |
 | Extra packages | MoltenVK, loader, shader tools, headers | None beyond cmake |
 
-## Problems met while setting up Vulkan
+### Problems met while setting up Vulkan
 
 | Problem | Cause and fix |
 |---|---|
 | `vulkan/vulkan_core.h` not found | Headers were not installed; cloning `KhronosGroup/Vulkan-Headers` and setting `CPATH` fixed it |
 | `vulkan-loader` and `molten-vk` missing | Installed with `brew install molten-vk vulkan-loader` |
 | `vulkaninfo: command not found` | `vulkan-tools` needs a full Xcode install to build on Intel; skipped |
-| `-cnv` rejected | Flag removed in recent builds; chat mode is the default |
 | Homebrew warns about Intel support | Bottles are no longer built for Intel Macs, so formulas compile from source |
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| Process still shows under the display card | Try the other index (0 or 1) and recheck Activity Monitor |
-| Garbled text | Add `-fa off` and try `-c 2048` |
-| Out of memory | Use a smaller quant (Q3_K_M) or a 3B model |
-| Patch does not apply | llama.cpp has changed; make the one-line change by hand (see step 3) |
-| Patched build fails to compile | Revert with `git checkout ggml/src/ggml-metal/ggml-metal-device.m` and use the default GPU |
-| Metal fails to start | Build CPU-only to isolate the cause: `cmake -B build-cpu -DGGML_METAL=OFF -DGGML_VULKAN=OFF` |
 
 ## Contributing
 
